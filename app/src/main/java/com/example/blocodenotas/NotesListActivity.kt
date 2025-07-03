@@ -1,46 +1,60 @@
 package com.example.blocodenotas
 
+import android.content.ComponentName
 import android.content.Intent
-import android.content.SharedPreferences
 import android.os.Bundle
+import android.util.Log
+import android.view.View
+import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
+import androidx.lifecycle.lifecycleScope
 import androidx.recyclerview.widget.LinearLayoutManager
 import androidx.recyclerview.widget.RecyclerView
 import com.google.android.material.floatingactionbutton.FloatingActionButton
-import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
+import kotlinx.coroutines.launch
 
 class NotesListActivity : AppCompatActivity() {
 
     private lateinit var recyclerView: RecyclerView
     private lateinit var fabAddNote: FloatingActionButton
+    private lateinit var tvEmptyState: TextView
     private lateinit var notesAdapter: NotesAdapter
-    private lateinit var sharedPreferences: SharedPreferences
+    private lateinit var repository: NotesRepository
     private var notesList = mutableListOf<Note>()
 
     companion object {
-        private const val PREF_NAME = "NotesApp"
-        private const val KEY_NOTES = "notes_list"
         const val REQUEST_CODE_ADD_NOTE = 1001
         const val REQUEST_CODE_EDIT_NOTE = 1002
+        private const val TAG = "NotesListActivity"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_notes_list)
 
+        Log.d(TAG, "onCreate: NotesListActivity iniciada")
+
         initViews()
+        setupDatabase()
         setupRecyclerView()
-        loadNotes()
         setupClickListeners()
+        observeNotes()
     }
 
     private fun initViews() {
         recyclerView = findViewById(R.id.recyclerViewNotes)
         fabAddNote = findViewById(R.id.fabAddNote)
-        sharedPreferences = getSharedPreferences(PREF_NAME, MODE_PRIVATE)
+        tvEmptyState = findViewById(R.id.tvEmptyState)
+
+        Log.d(TAG, "initViews: Views inicializadas")
+    }
+
+    private fun setupDatabase() {
+        val database = NotesDatabase.getDatabase(this)
+        repository = NotesRepository(database.noteDao())
+        Log.d(TAG, "setupDatabase: Database configurada")
     }
 
     private fun setupRecyclerView() {
@@ -49,12 +63,46 @@ class NotesListActivity : AppCompatActivity() {
         }
         recyclerView.layoutManager = LinearLayoutManager(this)
         recyclerView.adapter = notesAdapter
+        Log.d(TAG, "setupRecyclerView: RecyclerView configurado")
     }
 
     private fun setupClickListeners() {
         fabAddNote.setOnClickListener {
-            val intent = Intent(this, NoteEditActivity::class.java)
-            startActivityForResult(intent, REQUEST_CODE_ADD_NOTE)
+            Log.d(TAG, "FAB clicado - Abrindo NoteEditActivity")
+
+            // Intent EXPLÍCITO para garantir que vai para a Activity correta
+            val intent = Intent().apply {
+                // Especifica explicitamente qual Activity abrir
+                component = ComponentName(
+                    "com.example.blocodenotas",
+                    "com.example.blocodenotas.NoteEditActivity"
+                )
+                // Adiciona dados extras para debug
+                putExtra("mode", "create")
+                putExtra("debug", true)
+            }
+
+            Log.d(TAG, "Intent criado: ${intent.component}")
+
+            try {
+                startActivityForResult(intent, REQUEST_CODE_ADD_NOTE)
+                Log.d(TAG, "startActivityForResult chamado com sucesso")
+            } catch (e: Exception) {
+                Log.e(TAG, "Erro ao abrir NoteEditActivity", e)
+                Toast.makeText(this, "Erro ao abrir editor: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+
+    private fun observeNotes() {
+        lifecycleScope.launch {
+            repository.getAllNotes().collect { notes ->
+                Log.d(TAG, "observeNotes: ${notes.size} notas recebidas")
+                notesList.clear()
+                notesList.addAll(notes)
+                notesAdapter.notifyDataSetChanged()
+                updateEmptyState()
+            }
         }
     }
 
@@ -66,92 +114,98 @@ class NotesListActivity : AppCompatActivity() {
             .setItems(options) { _, which ->
                 when (which) {
                     0 -> openNote(note, position)
-                    1 -> deleteNote(position)
+                    1 -> deleteNote(note, position)
                 }
             }
             .show()
     }
 
     private fun openNote(note: Note, position: Int) {
-        val intent = Intent(this, NoteEditActivity::class.java).apply {
+        Log.d(TAG, "openNote: Abrindo nota ${note.id}")
+
+        val intent = Intent().apply {
+            component = ComponentName(
+                "com.example.blocodenotas",
+                "com.example.blocodenotas.NoteEditActivity"
+            )
             putExtra("note_id", note.id)
             putExtra("note_title", note.title)
             putExtra("note_content", note.content)
             putExtra("note_position", position)
+            putExtra("mode", "edit")
+            putExtra("debug", true)
         }
-        startActivityForResult(intent, REQUEST_CODE_EDIT_NOTE)
+
+        try {
+            startActivityForResult(intent, REQUEST_CODE_EDIT_NOTE)
+            Log.d(TAG, "Edit intent enviado com sucesso")
+        } catch (e: Exception) {
+            Log.e(TAG, "Erro ao abrir nota para edição", e)
+            Toast.makeText(this, "Erro ao abrir nota: ${e.message}", Toast.LENGTH_LONG).show()
+        }
     }
 
-    private fun deleteNote(position: Int) {
+    private fun deleteNote(note: Note, position: Int) {
         AlertDialog.Builder(this)
             .setTitle("Excluir Nota")
             .setMessage("Tem certeza que deseja excluir esta nota?")
             .setPositiveButton("Sim") { _, _ ->
-                notesList.removeAt(position)
-                notesAdapter.notifyItemRemoved(position)
-                saveNotes()
-                Toast.makeText(this, "Nota excluída", Toast.LENGTH_SHORT).show()
+                lifecycleScope.launch {
+                    try {
+                        repository.deleteNote(note)
+                        Toast.makeText(this@NotesListActivity, "Nota excluída", Toast.LENGTH_SHORT).show()
+                        Log.d(TAG, "Nota ${note.id} excluída")
+                    } catch (e: Exception) {
+                        Log.e(TAG, "Erro ao excluir nota", e)
+                        Toast.makeText(this@NotesListActivity, "Erro ao excluir nota", Toast.LENGTH_SHORT).show()
+                    }
+                }
             }
             .setNegativeButton("Não", null)
             .show()
     }
 
-    private fun loadNotes() {
-        val notesJson = sharedPreferences.getString(KEY_NOTES, "[]")
-        val type = object : TypeToken<MutableList<Note>>() {}.type
-        notesList.clear()
-        notesList.addAll(Gson().fromJson(notesJson, type))
-        notesAdapter.notifyDataSetChanged()
+    private fun updateEmptyState() {
+        if (notesList.isEmpty()) {
+            tvEmptyState.visibility = View.VISIBLE
+            recyclerView.visibility = View.GONE
+            Log.d(TAG, "updateEmptyState: Mostrando estado vazio")
+        } else {
+            tvEmptyState.visibility = View.GONE
+            recyclerView.visibility = View.VISIBLE
+            Log.d(TAG, "updateEmptyState: Mostrando lista com ${notesList.size} notas")
+        }
     }
 
-    private fun saveNotes() {
-        val notesJson = Gson().toJson(notesList)
-        sharedPreferences.edit()
-            .putString(KEY_NOTES, notesJson)
-            .apply()
-    }
-
+    @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
 
-        if (resultCode == RESULT_OK && data != null) {
+        Log.d(TAG, "onActivityResult: requestCode=$requestCode, resultCode=$resultCode")
+
+        if (resultCode == RESULT_OK) {
             when (requestCode) {
                 REQUEST_CODE_ADD_NOTE -> {
-                    val title = data.getStringExtra("title") ?: ""
-                    val content = data.getStringExtra("content") ?: ""
-
-                    if (title.isNotEmpty() || content.isNotEmpty()) {
-                        val newNote = Note(
-                            id = System.currentTimeMillis(),
-                            title = title.ifEmpty { "Nota sem título" },
-                            content = content,
-                            lastModified = System.currentTimeMillis()
-                        )
-
-                        notesList.add(0, newNote)
-                        notesAdapter.notifyItemInserted(0)
-                        recyclerView.scrollToPosition(0)
-                        saveNotes()
-                    }
+                    Log.d(TAG, "onActivityResult: Nova nota criada")
+                    Toast.makeText(this, "Nota criada com sucesso", Toast.LENGTH_SHORT).show()
                 }
-
                 REQUEST_CODE_EDIT_NOTE -> {
-                    val position = data.getIntExtra("note_position", -1)
-                    val title = data.getStringExtra("title") ?: ""
-                    val content = data.getStringExtra("content") ?: ""
-
-                    if (position >= 0 && position < notesList.size) {
-                        notesList[position].apply {
-                            this.title = title.ifEmpty { "Nota sem título" }
-                            this.content = content
-                            this.lastModified = System.currentTimeMillis()
-                        }
-
-                        notesAdapter.notifyItemChanged(position)
-                        saveNotes()
-                    }
+                    Log.d(TAG, "onActivityResult: Nota editada")
+                    Toast.makeText(this, "Nota atualizada com sucesso", Toast.LENGTH_SHORT).show()
                 }
             }
+        } else {
+            Log.d(TAG, "onActivityResult: Operação cancelada ou falhou")
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        Log.d(TAG, "onResume: NotesListActivity voltou ao foco")
+    }
+
+    override fun onPause() {
+        super.onPause()
+        Log.d(TAG, "onPause: NotesListActivity perdeu o foco")
     }
 }
